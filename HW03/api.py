@@ -40,10 +40,6 @@
 # аргументы валидны, если валидны все поля по отдельности и если присутсвует хоть одна пара
 # phone-email, first name-last name, gender-birthday с непустыми значениями.
 
-# Контекст
-# в словарь контекста должна прописываться запись  "has" - список полей,
-# которые были не пустые для данного запроса
-
 # Ответ:
 # в ответ выдается произвольное число, которое больше или равно 0
 # {"score": <число>}
@@ -51,7 +47,6 @@
 # {"score": 42}
 # или если произошла ошибка валидации
 # {"code": 422, "error": "<сообщение о том какое поле невалидно>"}
-
 
 # $ curl -X POST  -H "Content-Type: application/json" -d '{"account": "horns&hoofs", "login": "h&f", "method": "online_score", "token": "55cc9ce545bcd144300fe9efc28e65d415b923ebb6be1e19d2750a2c03e80dd209a27954dca045e5bb12418e7d89b6d718a9e35af34e14e1d5bcd5a08f21fc95", "arguments": {"phone": "79175002040", "email": "stupnikov@otus.ru", "first_name": "Стансилав", "last_name": "Ступников", "birthday": "01.01.1990", "gender": 1}}' http://127.0.0.1:8080/method/
 # -> {"code": 200, "response": {"score": 5.0}}
@@ -63,11 +58,6 @@
 
 # Валидация аругементов:
 # аргументы валидны, если валидны все поля по отдельности.
-
-# Контекст
-# в словарь контекста должна прописываться запись  "nclients" - количество id'шников,
-# переденанных в запрос
-
 
 # Ответ:
 # в ответ выдается словарь <id клиента>:<список интересов>. Список генерировать произвольно.
@@ -117,8 +107,15 @@ GENDERS = {
 }
 
 
+class ValidationError(ValueError):
+    pass
+
+
 class Field(object):
-    def __init__(self, required, nullable=None):
+    ASSERTS_LIST = (lambda v: True, )
+    ERROR_TEXT = 'value is not valid'
+
+    def __init__(self, required, nullable=False):
         self._required = required
         self._nullable = nullable
 
@@ -126,83 +123,87 @@ class Field(object):
     def required(self):
         return self._required
 
-    def is_valid(self, value):
-        raise Exception("Not Implemented")
+    @property
+    def nullable(self):
+        return self._nullable
+
+    def _get_value(self, value):
+        return value
+
+    def _has_value(self, value):
+        return bool(value)
+
+    def parse(self, value):
+        v = self._get_value(value)
+        if self._has_value(v):
+            if not any(a(v) for a in self.ASSERTS_LIST):
+                raise ValidationError(self.ERROR_TEXT)
+        else:
+            if not self.nullable:
+                raise ValidationError(self.ERROR_TEXT)
+        return v
 
 
 class CharField(Field):
-    def is_valid(self, value):
-        if not self._nullable:
-            return bool(value) and isinstance(value, basestring)
-        return True
+    ERROR_TEXT = 'value is not Charfield'
+    ASSERTS_LIST = (lambda v: isinstance(v, basestring), )
 
 
 class ArgumentsField(Field):
-    def is_valid(self, value):
-        if not self._nullable:
-            return bool(value)
-        return True
+    ERROR_TEXT = 'value is not ArgumentsField'
+    ASSERTS_LIST = (lambda v: isinstance(v, dict), )
 
 
 class EmailField(CharField):
-    def is_valid(self, value):
-        r = super(EmailField, self).is_valid(value)
-        if value:
-            return '@' in value
-        return r
+    ERROR_TEXT = 'value is not EmailField'
+    ASSERTS_LIST = (lambda v: '@' in v, )
+
+    def parse(self, value):
+        v = CharField(self.required, self.nullable).parse(value)
+        return super(CharField, self).parse(v)
 
 
 class PhoneField(Field):
-    def is_valid(self, value):
-        if value:
-            phone = str(value)
-            if len(phone) == 11 and phone.startswith('7'):
-                return True
-            else:
-                return False
-        else:
-            return self._nullable
+    ERROR_TEXT = 'value is not PhoneField'
+    ASSERTS_LIST = (lambda v: len(v) == 11 and v.startswith('7') and all(c.isdigit() for c in v), )
+
+    def _get_value(self, value):
+        return unicode(value)
 
 
 class DateField(Field):
-    def is_valid(self, value):
-        if value:
-            try:
-                return datetime.datetime.strptime(value, '%d.%m.%Y')
-            except ValueError:
-                return False
-        else:
-            return self._nullable
+    ERROR_TEXT = 'value is not DateField'
+
+    def _get_value(self, value):
+        try:
+            return datetime.datetime.strptime(value, '%d.%m.%Y')
+        except ValueError:
+            raise ValidationError(self.ERROR_TEXT)
 
 
-class BirthDayField(Field):
+class BirthDayField(DateField):
     DAYS_IN_YEAR = 365
     MAX_AGE = 70
-    def is_valid(self, value):
-        if value:
-            try:
-                return ((datetime.datetime.now() -
-                         datetime.datetime.strptime(value, '%d.%m.%Y')).days / self.DAYS_IN_YEAR) <= self.MAX_AGE
-            except ValueError:
-                return False
-        else:
-            return self._nullable
+
+    ERROR_TEXT = 'value is not BirthDayField'
+    ASSERTS_LIST = (lambda v: (((datetime.datetime.now() - v).days / BirthDayField.DAYS_IN_YEAR) <= BirthDayField.MAX_AGE), )
+
+    def parse(self, value):
+        DateField(self.required, self.nullable).parse(value)
+        return super(DateField, self).parse(value)
 
 
 class GenderField(Field):
-    def is_valid(self, value):
-        if value:
-            try:
-                return int(value) in (0, 1, 2)
-            except ValueError:
-                return False
-        else:
-            return self._nullable
+    ERROR_TEXT = 'value is not GenderField'
+    ASSERTS_LIST = (lambda v: isinstance(v, int) and v in GENDERS, )
+
+    def _has_value(self, value):
+        return bool(value) or (value == 0)
 
 
 class ClientIDsField(Field):
-    def is_valid(self, value):
-        return bool(value)
+    ERROR_TEXT = 'value is not ClientIDsField'
+    ASSERTS_LIST = (lambda v: isinstance(v, list) and all(isinstance(e, int) for e in v), )
 
 
 class StructMeta(type):
@@ -220,46 +221,40 @@ class Struct(object):
 
     def __init__(self, values):
         self._values = values
-
-    def process(self):
-        pass
-
-    def values_as_object(self):
-        class Record:
-            pass
-        r = Record()
-        for f, v in self._values.items():
-            setattr(r, f, v)
-        return r
+        self._errors = []
 
     def is_valid(self):
-        return not bool(self.errors())
+        self.check()
+        return not self._errors
 
-    def errors(self):
-        errors = []
+    def get_errors(self):
+        return '; '.join(self._errors)
+
+    def check(self):
+        self.errors = []
         try:
             for f, v in self._fields.items():
                 if f not in self._values:
                     if v.required:
-                        errors.append('%s not exists' % f)
+                        self._errors.append('%s not exists' % f)
                 else:
-                    if not v.is_valid(self._values[f]):
-                        errors.append('%s not valid' % f)
+                    try:
+                        _v = v.parse(self._values[f])
+                        setattr(self, f, _v)
+                    except ValidationError as E:
+                        self._errors.append('%s has error %s' % (f, E))
         except Exception as E:
-            errors.append('Unknown error %s' % E)
-        return errors
+            self._errors.append('Unknown error %s' % E)
+
+    def _field_has_value(self, field):
+        if field in self._values:
+            return self._fields[field]._has_value(self._values[field])
+        return False
 
 
 class ClientsInterestsRequest(Struct):
     client_ids = ClientIDsField(required=True)
     date = DateField(required=False, nullable=True)
-
-    def process(self):
-        if self.is_valid():
-            result = {'client_id' + str(c): ['a', 'b']  for c in self._values['client_ids']}
-            return OK, result
-        else:
-            return INVALID_REQUEST, '; '.join(self.errors())
 
 
 class OnlineScoreRequest(Struct):
@@ -270,27 +265,15 @@ class OnlineScoreRequest(Struct):
     birthday = BirthDayField(required=False, nullable=True)
     gender = GenderField(required=False, nullable=True)
 
-    def errors(self):
-        errors = super(OnlineScoreRequest, self).errors()
+    def check(self):
+        super(OnlineScoreRequest, self).check()
         flag_has_pair = False
         for field1, field2 in (('phone', 'email'), ('first_name', 'last_name'), ('gender', 'birthday')):
-            if (field1 in self._values and self._values[field1]) and \
-               (field2 in self._values and self._values[field2]):
+            if self._field_has_value(field1) and self._field_has_value(field2):
                 flag_has_pair = True
                 break
         if not flag_has_pair:
-            errors.append('Valid fields pairs not found')
-        return errors
-
-    def process(self):
-        if self.is_valid():
-            method_request = MethodRequest(self._values)
-            if method_request.is_admin:
-                return OK, {'score': 42}
-            else:
-                return OK, {'score': 8}
-        else:
-            return INVALID_REQUEST, '; '.join(self.errors())
+            self._errors.append('Valid fields pairs not found')
 
 
 class MethodRequest(Struct):
@@ -298,13 +281,7 @@ class MethodRequest(Struct):
     login = CharField(required=True, nullable=True)
     token = CharField(required=True, nullable=True)
     arguments = ArgumentsField(required=True, nullable=True)
-    method = CharField(required=True, nullable=False)
-
-    def process(self):
-        if self.is_valid():
-            return OK, 'OK'
-        else:
-            return INVALID_REQUEST, '; '.join(self.errors())
+    method = CharField(required=True, nullable=True)
 
     @property
     def is_admin(self):
@@ -321,22 +298,43 @@ def check_auth(request):
     return False
 
 
+def online_score_proc(request_type, args, method_request, context):
+    req_obj = request_type(args)
+    if req_obj.is_valid():
+        context['has'] = [f for f in req_obj._values if req_obj._field_has_value(f)]
+        result = {}
+        if method_request.is_admin:
+            result['score'] = 42
+        else:
+            result['score'] = 8
+        return result, OK
+    return req_obj.get_errors(), INVALID_REQUEST
+
+
+def clients_interests_proc(request_type, args, method_request, context):
+    req_obj = request_type(args)
+    if req_obj.is_valid():
+        context['nclients'] = len(req_obj.client_ids)
+        result = {'client_id' + str(c): ['a', 'b'] for c in req_obj.client_ids}
+        return result, OK
+    return req_obj.get_errors(), INVALID_REQUEST
+
+
 def method_handler(request, ctx):
-    REQUESTS = {
-        'online_score': OnlineScoreRequest,
-        'clients_interests': ClientsInterestsRequest
+    METHODS = {
+        'online_score': (online_score_proc, OnlineScoreRequest),
+        'clients_interests': (clients_interests_proc, ClientsInterestsRequest),
     }
 
     method_request = MethodRequest(request['body'])
-    code, response = method_request.process()
-    if code == 200:
-        if not check_auth(method_request.values_as_object()):
-            response, code = "Forbidden", 403
-        else:
-            if method_request.values_as_object().method in REQUESTS:
-                code, response = REQUESTS[method_request.values_as_object().method](request['body']['arguments']).process()
-            else:
-                response, code = ERRORS[NOT_FOUND], NOT_FOUND
+    if not method_request.is_valid():
+        return method_request.get_errors(), INVALID_REQUEST
+    if not check_auth(method_request):
+        return None, FORBIDDEN
+    method_proc = METHODS.get(method_request.method)
+    if not method_proc:
+        return 'Method proc not found', NOT_FOUND
+    response, code = method_proc[0](method_proc[1], request['body']['arguments'], method_request, ctx)
     return response, code
 
 
